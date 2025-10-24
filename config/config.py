@@ -28,7 +28,8 @@ class Config:
     # SSH Configuration
     MAX_CONNECTIONS_PER_USER: int = int(os.getenv('MAX_CONNECTIONS_PER_USER', '5'))
     SESSION_TIMEOUT: int = int(os.getenv('SESSION_TIMEOUT', '3600'))  # seconds
-    MAX_OUTPUT_LENGTH: int = int(os.getenv('MAX_OUTPUT_LENGTH', '4000'))  # characters
+    MAX_OUTPUT_LENGTH: int = int(os.getenv('MAX_OUTPUT_LENGTH', '100000'))  # characters
+    OUTPUT_PAGE_SIZE: int = 3500  # Characters per page for pagination
     
     # Connection timeouts
     SSH_CONNECT_TIMEOUT: int = 30  # seconds
