@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from keyboards import Keyboards
-from utils import SSHManager, SessionManager
+from utils import SSHManager, SessionManager, FileEditor
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,17 @@ class CallbackHandlers:
             await self._show_quick_commands(query, user_id)
         elif data.startswith("quick_"):
             await self._execute_quick_command(query, user_id, data)
+        # File editing
+        elif data == "file_edit_select":
+            await self._prompt_file_to_edit(query, user_id)
+        elif data.startswith("file_edit:"):
+            filepath = data.split(":", 1)[1]
+            await self._edit_file(query, user_id, filepath)
+        elif data.startswith("file_save:"):
+            filepath = data.split(":", 1)[1]
+            await self._save_file(query, user_id, filepath)
+        elif data.startswith("file_cancel_edit:"):
+            await self._cancel_edit(query, user_id)
         # Pagination
         elif data.startswith("page_") or data.startswith("file_page_"):
             await self._handle_pagination(query, user_id, data)
@@ -785,3 +796,162 @@ class CallbackHandlers:
                 "❌ Error navigating pages.",
                 reply_markup=Keyboards.main_menu(self.ssh.is_connected(user_id))
             )
+    
+    # File Editor Handlers
+    async def _prompt_file_to_edit(self, query, user_id: int):
+        """Prompt user to enter filename to edit."""
+        if not self.ssh.is_connected(user_id):
+            await query.edit_message_text(
+                "❌ No active SSH connection.",
+                reply_markup=Keyboards.main_menu(False)
+            )
+            return
+        
+        self.sessions.set_state(user_id, 'awaiting_file_to_edit')
+        
+        session = self.ssh.get_session(user_id)
+        await query.edit_message_text(
+            f"📝 **Edit File**\n\n"
+            f"Current directory: `{session.current_directory}`\n\n"
+            "Enter the filename or path to edit:",
+            reply_markup=Keyboards.back_to_main(),
+            parse_mode='Markdown'
+        )
+    
+    async def _edit_file(self, query, user_id: int, filepath: str):
+        """Show file content for editing."""
+        if not self.ssh.is_connected(user_id):
+            await query.edit_message_text(
+                "❌ No active SSH connection.",
+                reply_markup=Keyboards.main_menu(False)
+            )
+            return
+        
+        # Get file info
+        success, file_info, error_msg = FileEditor.get_file_info(self.ssh, user_id, filepath)
+        if not success:
+            await query.edit_message_text(
+                f"❌ {error_msg}",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            return
+        
+        # Check if it's a text file
+        if not FileEditor.is_text_file(self.ssh, user_id, filepath):
+            await query.edit_message_text(
+                f"⚠️ `{filepath}` is not a text file.\n\n"
+                "Only text files can be edited.",
+                reply_markup=Keyboards.file_manager_menu(),
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Read file content
+        success, content, error_msg = FileEditor.read_file(self.ssh, user_id, filepath)
+        if not success:
+            await query.edit_message_text(
+                f"❌ {error_msg}",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            return
+        
+        # Store file content for editing
+        self.sessions.set_state(user_id, 'editing_file')
+        self.sessions.set_temp_data(user_id, 'editing_filepath', filepath)
+        self.sessions.set_temp_data(user_id, 'original_content', content)
+        
+        # Split into pages if needed
+        pages = FileEditor.split_content_to_pages(content, 3000)
+        
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        if len(pages) > 1:
+            # Show paginated view
+            self.sessions.set_temp_data(user_id, 'edit_pages', pages)
+            self.sessions.set_temp_data(user_id, 'edit_page', 0)
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("⬅️ Prev", callback_data=f"edit_prev:{filepath}"),
+                    InlineKeyboardButton(f"📄 1/{len(pages)}", callback_data="noop"),
+                    InlineKeyboardButton("➡️ Next", callback_data=f"edit_next:{filepath}")
+                ],
+                [InlineKeyboardButton("✏️ Edit Content", callback_data=f"edit_content:{filepath}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="file_cancel_edit:0")],
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_files")]
+            ]
+            
+            await query.edit_message_text(
+                f"📝 **Editing:** `{filepath}`\n"
+                f"📊 **Size:** {FileEditor.format_size(file_info['size'])}\n"
+                f"🔒 **Permissions:** {file_info['permissions']}\n\n"
+                f"```\n{pages[0]}\n```",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            # Show single page with edit option
+            keyboard = [
+                [InlineKeyboardButton("✏️ Edit Content", callback_data=f"edit_content:{filepath}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="file_cancel_edit:0")],
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_files")]
+            ]
+            
+            await query.edit_message_text(
+                f"📝 **Editing:** `{filepath}`\n"
+                f"📊 **Size:** {FileEditor.format_size(file_info['size'])}\n"
+                f"🔒 **Permissions:** {file_info['permissions']}\n\n"
+                f"```\n{content}\n```\n\n"
+                "Click **Edit Content** to modify this file.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+    
+    async def _save_file(self, query, user_id: int, filepath: str):
+        """Save edited file content."""
+        if not self.ssh.is_connected(user_id):
+            await query.edit_message_text(
+                "❌ No active SSH connection.",
+                reply_markup=Keyboards.main_menu(False)
+            )
+            return
+        
+        # Get new content from temp data
+        new_content = self.sessions.get_temp_data(user_id, 'new_file_content')
+        if new_content is None:
+            await query.edit_message_text(
+                "❌ No content to save.",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            return
+        
+        # Save file
+        success, message = FileEditor.write_file(self.ssh, user_id, filepath, new_content)
+        
+        # Clear editing state
+        self.sessions.reset_state(user_id)
+        self.sessions.clear_temp_data(user_id)
+        
+        if success:
+            await query.edit_message_text(
+                f"{message}\n\n"
+                f"📁 File: `{filepath}`\n"
+                f"💾 Size: {FileEditor.format_size(len(new_content))} bytes",
+                reply_markup=Keyboards.file_manager_menu(),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"{message}",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+    
+    async def _cancel_edit(self, query, user_id: int):
+        """Cancel file editing."""
+        self.sessions.reset_state(user_id)
+        self.sessions.clear_temp_data(user_id)
+        
+        await query.edit_message_text(
+            "❌ Edit cancelled.",
+            reply_markup=Keyboards.file_manager_menu()
+        )

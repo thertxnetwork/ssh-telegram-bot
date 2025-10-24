@@ -2,6 +2,8 @@ from .ssh_manager import SSHManager, SSHConnectionError
 from .session_manager import SessionManager
 from .file_manager import FileManager
 from .system_monitor import SystemMonitor
+from .file_editor import FileEditor
+from .session_persistence import SessionPersistence
 from .helpers import (
     setup_logging,
     format_output,
@@ -17,6 +19,8 @@ __all__ = [
     'SessionManager',
     'FileManager',
     'SystemMonitor',
+    'FileEditor',
+    'SessionPersistence',
     'setup_logging',
     'format_output',
     'escape_markdown',

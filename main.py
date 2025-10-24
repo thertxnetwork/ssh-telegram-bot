@@ -39,6 +39,10 @@ class SSHTelegramBot:
         self.ssh_manager = SSHManager()
         self.session_manager = SessionManager()
         
+        # Restore saved sessions
+        logger.info("Restoring saved sessions...")
+        self.ssh_manager.restore_sessions()
+        
         # Initialize handlers
         self.command_handlers = CommandHandlers(self.ssh_manager, self.session_manager)
         self.callback_handlers = CallbackHandlers(self.ssh_manager, self.session_manager)

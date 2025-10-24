@@ -184,6 +184,10 @@ class CommandHandlers:
             await self._handle_command_input(update, context, text)
         elif user_state.state == "awaiting_download_path":
             await self._handle_download_path(update, context, text)
+        elif user_state.state == "awaiting_file_to_edit":
+            await self._handle_file_to_edit(update, context, text)
+        elif user_state.state == "editing_file":
+            await self._handle_file_content_edit(update, context, text)
         elif user_state.state == "connected" and self.ssh.is_connected(user_id):
             # Execute command if connected
             await self._handle_command_input(update, context, text)
@@ -489,3 +493,114 @@ class CommandHandlers:
         )
         
         self.sessions.reset_state(user_id)
+    
+    async def _handle_file_to_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle filename input for editing."""
+        user_id = update.effective_user.id
+        filepath = text.strip()
+        
+        if not filepath:
+            await update.message.reply_text(
+                "❌ Please enter a valid filename.",
+                reply_markup=Keyboards.back_to_main()
+            )
+            return
+        
+        # Import here to avoid circular import
+        from utils import FileEditor
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        # Get file info
+        success, file_info, error_msg = FileEditor.get_file_info(self.ssh, user_id, filepath)
+        if not success:
+            await update.message.reply_text(
+                f"❌ {error_msg}",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            self.sessions.reset_state(user_id)
+            return
+        
+        # Check if it's a text file
+        if not FileEditor.is_text_file(self.ssh, user_id, filepath):
+            await update.message.reply_text(
+                f"⚠️ `{filepath}` is not a text file.\n\n"
+                "Only text files can be edited.",
+                reply_markup=Keyboards.file_manager_menu(),
+                parse_mode='Markdown'
+            )
+            self.sessions.reset_state(user_id)
+            return
+        
+        # Read file content
+        success, content, error_msg = FileEditor.read_file(self.ssh, user_id, filepath)
+        if not success:
+            await update.message.reply_text(
+                f"❌ {error_msg}",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            self.sessions.reset_state(user_id)
+            return
+        
+        # Store file content for editing
+        self.sessions.set_state(user_id, 'editing_file')
+        self.sessions.set_temp_data(user_id, 'editing_filepath', filepath)
+        self.sessions.set_temp_data(user_id, 'original_content', content)
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Send New Content", callback_data=f"edit_content:{filepath}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="file_cancel_edit:0")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_files")]
+        ]
+        
+        # Show preview
+        preview = content[:3000] + "\n... (truncated)" if len(content) > 3000 else content
+        
+        await update.message.reply_text(
+            f"📝 **Editing:** `{filepath}`\n"
+            f"📊 **Size:** {FileEditor.format_size(file_info['size'])}\n"
+            f"🔒 **Permissions:** {file_info['permissions']}\n\n"
+            f"**Current Content:**\n```\n{preview}\n```\n\n"
+            "✏️ **Send the new content** as a text message to replace the file.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    
+    async def _handle_file_content_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle new file content from user."""
+        user_id = update.effective_user.id
+        filepath = self.sessions.get_temp_data(user_id, 'editing_filepath')
+        
+        if not filepath:
+            await update.message.reply_text(
+                "❌ No file being edited.",
+                reply_markup=Keyboards.file_manager_menu()
+            )
+            return
+        
+        # Import here to avoid circular import
+        from utils import FileEditor
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        # Save the new content
+        success, message = FileEditor.write_file(self.ssh, user_id, filepath, text)
+        
+        # Clear editing state
+        self.sessions.reset_state(user_id)
+        self.sessions.clear_temp_data(user_id)
+        
+        keyboard = [[InlineKeyboardButton("📂 File Manager", callback_data="menu_files")]]
+        
+        if success:
+            await update.message.reply_text(
+                f"{message}\n\n"
+                f"📁 **File:** `{filepath}`\n"
+                f"💾 **Size:** {FileEditor.format_size(len(text))} bytes\n\n"
+                "✅ Changes saved successfully!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"{message}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )

@@ -1,6 +1,9 @@
 # Environment variables
 .env
 
+# Session data (contains sensitive info)
+sessions.json
+
 # Python
 __pycache__/
 *.py[cod]

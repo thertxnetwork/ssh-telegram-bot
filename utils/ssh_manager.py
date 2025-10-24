@@ -7,6 +7,7 @@ from io import BytesIO
 
 from config import Config
 from models import SSHSession
+from utils.session_persistence import SessionPersistence
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class SSHManager:
         """Initialize SSH manager."""
         self.connections: Dict[int, paramiko.SSHClient] = {}
         self.sessions: Dict[int, SSHSession] = {}
+        self.persistence = SessionPersistence()
     
     def create_connection(
         self,
@@ -111,6 +113,16 @@ class SSHManager:
             )
             self.sessions[user_id] = session
             
+            # Save session for persistence (survive restarts)
+            self.persistence.save_session(user_id, {
+                'host': host,
+                'port': port,
+                'username': username,
+                'password': password,
+                'current_directory': session.current_directory,
+                'session_id': session.session_id
+            })
+            
             logger.info(f"SSH connection established for user {user_id}")
             return True, f"✅ Connected to {host}:{port} as {username}"
             
@@ -168,6 +180,17 @@ class SSHManager:
                     return False, "", stderr_output
                 
                 session.current_directory = new_dir
+                
+                # Update persisted session
+                self.persistence.save_session(user_id, {
+                    'host': session.host,
+                    'port': session.port,
+                    'username': session.username,
+                    'password': session.password,
+                    'current_directory': session.current_directory,
+                    'session_id': session.session_id
+                })
+                
                 return True, f"Changed directory to: {new_dir}", ""
             
             # Execute command in current directory
@@ -309,6 +332,9 @@ class SSHManager:
             if user_id in self.sessions:
                 del self.sessions[user_id]
             
+            # Remove from persistence
+            self.persistence.delete_session(user_id)
+            
             logger.info(f"SSH connection closed for user {user_id}")
             return True, "✅ Disconnected from SSH server"
             
@@ -338,3 +364,49 @@ class SSHManager:
         for user_id in stale_users:
             logger.info(f"Cleaning up stale session for user {user_id}")
             self.disconnect(user_id)
+    
+    def restore_sessions(self):
+        """
+        Restore saved sessions on bot startup.
+        Attempts to reconnect to previously saved SSH sessions.
+        """
+        saved_sessions = self.persistence.load_sessions()
+        
+        if not saved_sessions:
+            logger.info("No saved sessions to restore")
+            return
+        
+        logger.info(f"Attempting to restore {len(saved_sessions)} saved sessions...")
+        
+        for user_id_str, session_data in saved_sessions.items():
+            try:
+                user_id = int(user_id_str)
+                
+                # Skip if already connected
+                if self.is_connected(user_id):
+                    continue
+                
+                # Attempt reconnection
+                success, message = self.create_connection(
+                    user_id=user_id,
+                    host=session_data['host'],
+                    port=session_data['port'],
+                    username=session_data['username'],
+                    password=session_data.get('password')
+                )
+                
+                if success:
+                    # Restore directory
+                    if 'current_directory' in session_data:
+                        session = self.get_session(user_id)
+                        if session:
+                            session.current_directory = session_data['current_directory']
+                    
+                    logger.info(f"Restored session for user {user_id}")
+                else:
+                    logger.warning(f"Failed to restore session for user {user_id}: {message}")
+                    # Remove invalid session
+                    self.persistence.delete_session(user_id)
+                    
+            except Exception as e:
+                logger.error(f"Error restoring session for user {user_id_str}: {e}")
